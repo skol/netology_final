@@ -3,4 +3,8 @@ name = "netology-final"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "huggingface-hub>=1.27.0",
+    "numpy>=2.5.2",
+    "polars>=1.43.2",
+]
