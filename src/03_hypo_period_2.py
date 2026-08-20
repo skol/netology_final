@@ -16,11 +16,23 @@ emb_dict = dict(zip(item_ids, embeddings))
 
 con = duckdb.connect()
 con.execute(
-    "create view week_00 as select * from read_parquet('../data/raw/VK-LSVD/subsamples/up0.001_ip0.001/train/week_00.parquet')"
+    """
+    create view week_00 as 
+    select * 
+    from read_parquet('../data/raw/VK-LSVD/subsamples/up0.001_ip0.001/train/week_10.parquet')
+        where timespent >= 5 and (
+            "like" is not null or 
+            dislike is not null or 
+            share is not null or 
+            bookmark is not null or 
+            click_on_author is not null or 
+            open_comments is not null
+        )
+    """
 )
 
 # Фильтруем пользователей, у которых длинная история
-MIN_HISTORY = 40
+MIN_HISTORY = 100
 
 query = """
 select user_id, array_agg(item_id)
@@ -125,7 +137,7 @@ print("Запуск циклического анализа по всей ког
 stats = {"total_tested": 0, "users_with_periods": 0, "better_than_naive_count": 0, "all_discovered_periods": []}
 
 for user_id, item_list in user_histories.items():
-    res = evaluate_user_predictability(item_list, emb_dict, n_dims=32)
+    res = evaluate_user_predictability(item_list, emb_dict, n_dims=64)
 
     if res is not None:
         stats["total_tested"] += 1
@@ -144,7 +156,7 @@ print(f"Доля пользователей с выраженной циклич
 print(f"Доля пользователей, где тренд+период точнее наивного прогноза: {pct_gain:.2f}%")
 
 if len(stats["all_discovered_periods"]) > 0:
-    most_common = Counter(stats["all_discovered_periods"]).most_common(16)
-    print("\nТоп-5 самых частых периодов (в количестве видеороликов):")
+    most_common = Counter(stats["all_discovered_periods"]).most_common(64)
+    print("\nТоп-64 самых частых периодов (в количестве видеороликов):")
     for p, count in most_common:
         print(f"  Период повторения: {p} действий (встретился {count} раз)")
