@@ -9,9 +9,10 @@ import os
 from dataclasses import dataclass, field
 
 import numpy as np
-import polars as pl
 import torch
 from torch.utils.data import Dataset
+
+from common.data import build_user_sequences, build_validation, read_files
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
@@ -29,7 +30,8 @@ class DataConfig:
         if not self.train_files:
             self.train_files = [f"{self.data_dir}/train/week_{i:02}.parquet" for i in range(self.n_train_weeks)]
         if not self.val_files:
-            self.val_files = [f"{self.data_dir}/validation/week_{self.n_train_weeks:02}.parquet"]
+            dir_name = 'train' if self.n_train_weeks < 25 else 'validation'
+            self.val_files = [f"{self.data_dir}/{dir_name}/week_{self.n_train_weeks:02}.parquet"]
 
 
 @dataclass
@@ -56,33 +58,16 @@ class DataBundle:
 
 
 def load_and_build(cfg: DataConfig) -> DataBundle:
-    train_df = _read(cfg.train_files)
-    val_df = _read(cfg.val_files)
+    train_df = read_files(cfg.train_files)
+    val_df = read_files(cfg.val_files)
 
-    # глобальный порядок строк = порядок времени
-    train_df = train_df.with_row_index("__idx")
+    # ---------- словари + истории пользователей (в порядке строк) ----------
+    user_to_idx, item_to_idx, history = build_user_sequences(train_df)
 
-    # ---------- словари ----------
-    users_sorted = train_df["user_id"].unique().sort().to_list()
-    items_sorted = train_df["item_id"].unique().sort().to_list()
-    user_to_idx = {u: i for i, u in enumerate(users_sorted)}
-    item_to_idx = {i: j for j, i in enumerate(items_sorted)}
-
-    # ---------- истории пользователей (в порядке строк) ----------
-    grouped = (train_df.group_by("user_id", maintain_order=True)
-               .agg([pl.col("item_id").alias("items"),
-                     pl.col("__idx").alias("idx")]))
-
-    history: dict = {}          # user_idx -> list[item_idx]
+    # ---------- FPMC-специфичные триплеты (u, last, next) ----------
     last_item: dict = {}        # user_idx -> last item_idx
     triplets = []               # (u, last, next)
-
-    for user_id, items, idx in grouped.iter_rows():
-        # сортируем по глобальному индексу строки -> получаем хронологический порядок
-        order = np.argsort(idx)
-        seq = [item_to_idx[items[o]] for o in order]
-        u = user_to_idx[user_id]
-        history[u] = seq
+    for u, seq in history.items():
         if len(seq) >= 2:
             last_item[u] = seq[-1]
             for t in range(1, len(seq)):
@@ -91,41 +76,22 @@ def load_and_build(cfg: DataConfig) -> DataBundle:
     triplets = np.asarray(triplets, dtype=np.int64)
 
     # ---------- валидация ----------
-    # юзеры из трейна, у которых есть целевые айтемы в валидации
-    val_mask = val_df["user_id"].is_in(train_df["user_id"]) \
-        & val_df["item_id"].is_in(train_df["item_id"])
-    val_df = val_df.filter(val_mask).with_row_index("__vidx")
-
-    val_g = (val_df.group_by("user_id", maintain_order=True)
-             .agg([pl.col("item_id").alias("items"), pl.col("__vidx").alias("idx")]))
-
-    val_user_idxs = []
-    val_gt = []
-    for user_id, items, idx in val_g.iter_rows():
-        u = user_to_idx[user_id]
-        # верные айтемы, которых НЕТ в истории (иначе предсказывать нечего)
-        gt = [item_to_idx[i] for i in items if item_to_idx[i] not in set(history[u])]
-        if gt:
-            val_user_idxs.append(u)
-            val_gt.append(gt)
+    val_user_idxs, val_gt = build_validation(
+        val_df, train_df, user_to_idx, item_to_idx, history)
 
     return DataBundle(
         user_to_idx=user_to_idx,
         item_to_idx=item_to_idx,
-        n_users=len(users_sorted),
-        n_items=len(items_sorted),
+        n_users=len(user_to_idx),
+        n_items=len(item_to_idx),
         train_u=triplets[:, 0],
         train_last=triplets[:, 1],
         train_next=triplets[:, 2],
         history=history,
         last_item=last_item,
-        val_user_idxs=np.asarray(val_user_idxs, dtype=np.int64),
+        val_user_idxs=val_user_idxs,
         val_gt=val_gt,
     )
-
-
-def _read(files: list[str]) -> pl.DataFrame:
-    return pl.concat([pl.read_parquet(f) for f in files])
 
 
 class FPMCDataset(Dataset):

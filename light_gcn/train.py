@@ -1,4 +1,4 @@
-"""Тренировка FPMC с BPR-loss и оценка на валидации."""
+"""Тренировка LightGCN с BPR-loss и оценка на валидации."""
 
 import numpy as np
 import torch
@@ -6,12 +6,19 @@ from torch.utils.data import DataLoader
 
 from common.metrics import eval_metrics
 
-from .data import DataBundle, FPMCDataset
-from .model import FPMC
+from .data import DataBundle, LightGCNDataset, build_normalized_adjacency
+from .model import LightGCN
+
+
+def _prepare_adjacency(model: LightGCN, bundle: DataBundle, device: str):
+    """Строит нормализованную матрицу смежности и закрепляет её в модели."""
+    norm_adj = build_normalized_adjacency(
+        bundle.n_users, bundle.n_items, bundle.train_users, bundle.train_items, device)
+    model.norm_adj = norm_adj
 
 
 def train_model(
-    model: FPMC,
+    model: LightGCN,
     bundle: DataBundle,
     device: str,
     epochs: int = 10,
@@ -19,7 +26,11 @@ def train_model(
     lr: float = 1e-3,
     log_every: int = 200,
 ):
-    dataset = FPMCDataset(bundle, n_items=bundle.n_items)
+    """Обучает LightGCN через BPR-потерю с негативным семплированием."""
+    _prepare_adjacency(model, bundle, device)
+
+    dataset = LightGCNDataset(bundle.train_users, bundle.train_items,
+                              n_items=bundle.n_items)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -28,9 +39,12 @@ def train_model(
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         n_batches = 0
-        for u, last, nxt, neg in loader:
-            u, last, nxt, neg = (u.to(device), last.to(device), nxt.to(device), neg.to(device))
-            loss, _, _ = model(u, last, nxt, neg)
+        for u, pos_i, neg_i in loader:
+            u, pos_i, neg_i = (u.to(device), pos_i.to(device), neg_i.to(device))
+            # полный проход по графу для текущих эмбеддингов
+            user_emb, item_emb = model()
+            loss, _, _ = model.bpr_loss(user_emb, item_emb, u, pos_i, neg_i)
+
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -45,7 +59,7 @@ def train_model(
 
 
 def evaluate(
-    model: FPMC,
+    model: LightGCN,
     bundle: DataBundle,
     device: str,
     k: int = 10,
@@ -53,8 +67,9 @@ def evaluate(
 ) -> dict:
     """Recall@k / NDCG@k / MRR@k на юзерах из валидации.
 
-    Из кандидатов исключаются айтемы, которые пользователь уже видел в истории.
+    Из кандидатов исключаются ролики, которые пользователь уже видел в истории.
     """
+    _prepare_adjacency(model, bundle, device)
     model.to(device).eval()
 
     all_scores = []   # np-массивы скоров для валидных юзеров
@@ -62,24 +77,23 @@ def evaluate(
     last_ids = []     # списки кандидатов для каждого юзера
 
     with torch.no_grad():
+        user_emb, item_emb = model()
+
         for pos, u in enumerate(bundle.val_user_idxs):
-            # исключаем айтемы из истории пользователя
+            # исключаем ролики из истории пользователя
             seen = set(bundle.history[u])
-            cand = np.array([i for i in range(bundle.n_items) if i not in seen], dtype=np.int64)
-            l = bundle.last_item.get(u, -1)
-            if l == -1 or len(cand) == 0:
+            cand = np.array([i for i in range(bundle.n_items) if i not in seen],
+                            dtype=np.int64)
+            if len(cand) == 0:
                 continue
 
             u_t = torch.full((1,), u, device=device, dtype=torch.long)
-            l_t = torch.full((1,), l, device=device, dtype=torch.long)
             scores = torch.empty(len(cand), device=device)
             for s in range(0, len(cand), batch_cand):
                 chunk = torch.as_tensor(cand[s:s + batch_cand], device=device)
+                # скор = <эмбеддинг юзера, эмбеддинг ролика>
                 scores[s:s + len(chunk)] = model.score(
-                    u_t.expand(len(chunk)),
-                    l_t.expand(len(chunk)),
-                    chunk,
-                )
+                    user_emb, item_emb, u_t.expand(len(chunk)), chunk)
             all_scores.append(scores.cpu().numpy())
             kept_pos.append(pos)
             last_ids.append(cand)

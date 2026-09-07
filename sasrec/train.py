@@ -7,24 +7,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from common.utils import get_device, seed_everything
+
 from .model import SASRec
-
-
-def get_device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def seed_everything(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-    # Для воспроизводимости.
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
 def train_epoch(model: SASRec, loader: DataLoader, optimizer, device: str) -> float:

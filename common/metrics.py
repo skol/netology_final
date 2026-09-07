@@ -39,7 +39,7 @@ def eval_metrics(gt_positions: list[np.ndarray], k: int) -> dict:
         mrr_sum += (1.0 / valid[0]) if valid.size else 0.0
 
     return {
-        f"recall@{k}": total_hits / total_gt if total_gt else 0.0,
-        f"ndcg@{k}": ndcg_sum / n_users if n_users else 0.0,
-        f"mrr@{k}": mrr_sum / n_users if n_users else 0.0,
+        f"recall@{k}": float(total_hits / total_gt if total_gt else 0.0),
+        f"ndcg@{k}": float(ndcg_sum / n_users if n_users else 0.0),
+        f"mrr@{k}": float(mrr_sum / n_users if n_users else 0.0),
     }

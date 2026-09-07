@@ -8,6 +8,9 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from common.embeddings import load_embeddings_only
+from common.utils import get_device, seed_everything
+
 from .config import SASRecConfig
 from .data import (
     SequentialDataset,
@@ -17,9 +20,9 @@ from .data import (
     load_week_df,
     remap_samples,
 )
-from .embeddings import build_weight_matrix, load_embeddings_only
+from .embeddings import build_weight_matrix
 from .model import SASRec
-from .train import evaluate, get_device, seed_everything, train_epoch
+from .train import evaluate, train_epoch
 
 
 def main():
