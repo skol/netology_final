@@ -19,7 +19,7 @@ import polars as pl
 from common.data import build_id_maps, read_week, read_weeks
 
 # Колонки, которые считаются реакциями пользователя.
-REACTION_COLS = ["like", "dislike", "share", "bookmark"]
+REACTION_COLS = ["like", "dislike", "share", "bookmark", "click_on_author", "open_comments"]
 
 
 @dataclass
@@ -47,7 +47,7 @@ class DataBundle:
 def _assign_labels(df: pl.DataFrame, min_timespent: int) -> pl.DataFrame:
     """Добавляет колонку label: 1 (pos), 0 (neg). Неоднозначные строки удаляются."""
     has_reaction = (
-        df["like"] | df["dislike"] | df["share"] | df["bookmark"]
+        df["like"] | df["dislike"] | df["share"] | df["bookmark"] | df["click_on_author"] | df["open_comments"]
     )
     positive = (df["timespent"] >= min_timespent) | has_reaction
     negative = (df["timespent"] < min_timespent) & (~has_reaction)

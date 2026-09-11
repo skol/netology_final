@@ -16,8 +16,8 @@ from .model import MostPopular
 def parse_args():
     p = argparse.ArgumentParser(description="MostPopular для VK-LSVD")
     p.add_argument("--data_dir", type=str, default="data/raw/VK-LSVD/subsamples/up0.001_ip0.001")
-    p.add_argument("--start-week", type=int, default=0, help="Начальная неделя тренировочного периода")
-    p.add_argument("--end-week", type=int, default=23, help="Конечная неделя тренировочного периода (включительно)")
+    p.add_argument("--start-week", type=int, default=23, help="Начальная неделя тренировочного периода")
+    p.add_argument("--end-week", type=int, default=24, help="Конечная неделя тренировочного периода (включительно)")
     p.add_argument("--min-timespent-pos", type=int, default=5, help="Порог timespent для положительного примера (>=)")
     p.add_argument("--k", type=int, default=10, help="Глубина топ-k")
     return p.parse_args()

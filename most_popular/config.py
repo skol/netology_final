@@ -15,7 +15,7 @@ class MostPopularConfig:
 
     # Тренировочный период: недели [start_week, end_week] включительно.
     start_week: int = 0
-    end_week: int = 23
+    end_week: int = 24
 
     # Порог времени просмотра для положительного примера (timespent >= 5).
     min_timespent_pos: int = 5
