@@ -86,7 +86,7 @@ RESULTS_FILE = os.path.join(PATHS.results_dir, "metrics_by_group.csv")
 MODEL_BY_GROUP = {
     "cold": "fpmc",
     "warm": "sasrec",
-    "hot": "light_gcn",
+    "hot": "sasrec",
 }
 
 
