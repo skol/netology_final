@@ -1,11 +1,14 @@
 """Точка входа: загрузка данных -> MostPopular -> метрики на валидации.
 
 Пример:
-    python -m most_popular.main --start-week 0 --end-week 23 --k 10
+    python -m most_popular.main --start-week 0 --end-week 24 --k 10
 """
 
 import argparse
 import time
+
+from common.cli import add_common_args, config_from_args
+from common.utils import seed_everything
 
 from .config import MostPopularConfig
 from .data import load_and_build
@@ -15,23 +18,15 @@ from .model import MostPopular
 
 def parse_args():
     p = argparse.ArgumentParser(description="MostPopular для VK-LSVD")
-    p.add_argument("--data_dir", type=str, default="data/raw/VK-LSVD/subsamples/up0.001_ip0.001")
-    p.add_argument("--start-week", type=int, default=23, help="Начальная неделя тренировочного периода")
-    p.add_argument("--end-week", type=int, default=24, help="Конечная неделя тренировочного периода (включительно)")
-    p.add_argument("--min-timespent-pos", type=int, default=5, help="Порог timespent для положительного примера (>=)")
-    p.add_argument("--k", type=int, default=10, help="Глубина топ-k")
+    add_common_args(p)
     return p.parse_args()
 
 
 def main():
     args = parse_args()
-    cfg = MostPopularConfig(
-        data_dir=args.data_dir,
-        start_week=args.start_week,
-        end_week=args.end_week,
-        min_timespent_pos=args.min_timespent_pos,
-        k=args.k,
-    )
+    cfg = config_from_args(args, MostPopularConfig)
+    seed_everything(cfg.seed)
+
     print(f"Тренировочные недели: {cfg.start_week}..{cfg.end_week}, контрольная: {cfg.val_week}")
 
     t0 = time.time()

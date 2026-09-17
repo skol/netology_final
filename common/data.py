@@ -41,15 +41,17 @@ def build_id_maps(df: pl.DataFrame):
     return user_to_idx, item_to_idx
 
 
-def build_user_sequences(df: pl.DataFrame):
-    """Строит хронологические истории пользователей.
+def build_sequences_with_maps(df: pl.DataFrame, user_to_idx: dict, item_to_idx: dict) -> dict:
+    """Строит хронологические истории пользователей по готовым словарям.
+
+    Args:
+        df: подвыборка строк (например, только позитивные действия).
+        user_to_idx, item_to_idx: словари исходных id -> компактные индексы.
 
     Returns:
-        (user_to_idx, item_to_idx, history), где history[user_idx] =
-        list[item_idx] в хронологическом порядке (по глобальному порядку строк).
+        history: dict[user_idx -> list[item_idx]] в хронологическом порядке
+        (по глобальному порядку строк).
     """
-    user_to_idx, item_to_idx = build_id_maps(df)
-
     df = df.with_row_index("__idx")
     grouped = (df.group_by("user_id", maintain_order=True)
                .agg([pl.col("item_id").alias("items"),
@@ -62,6 +64,18 @@ def build_user_sequences(df: pl.DataFrame):
         seq = [item_to_idx[items[o]] for o in order]
         history[user_to_idx[user_id]] = seq
 
+    return history
+
+
+def build_user_sequences(df: pl.DataFrame):
+    """Строит хронологические истории пользователей.
+
+    Returns:
+        (user_to_idx, item_to_idx, history), где history[user_idx] =
+        list[item_idx] в хронологическом порядке (по глобальному порядку строк).
+    """
+    user_to_idx, item_to_idx = build_id_maps(df)
+    history = build_sequences_with_maps(df, user_to_idx, item_to_idx)
     return user_to_idx, item_to_idx, history
 
 

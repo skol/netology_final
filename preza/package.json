@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "mermaid-filter": "^1.4.7"
+  },
+  "devDependencies": {
+    "@marp-team/marp-cli": "^4.5.1"
+  }
+}

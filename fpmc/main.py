@@ -9,7 +9,8 @@ import time
 
 import torch
 
-from common.utils import get_device
+from common.cli import add_common_args, config_from_args
+from common.utils import get_device, seed_everything
 
 from .data import DataConfig, load_and_build
 from .model import FPMC
@@ -18,38 +19,34 @@ from .train import evaluate, train_model
 
 def parse_args():
     p = argparse.ArgumentParser(description="FPMC для VK-LSVD")
-    p.add_argument("--data_dir", type=str, default="data/raw/VK-LSVD/subsamples/up0.001_ip0.001")
-    p.add_argument("--n_train_weeks", type=int, default=25)
-    p.add_argument("--min_user_history", type=int, default=2)
-    p.add_argument("--dim", type=int, default=64)
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch_size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--k", type=int, default=10)
+    add_common_args(p)
+    p.add_argument("--dim", type=int, default=64, help="Размерность эмбеддингов")
+    p.add_argument("--batch-size", type=int, default=1024, help="Размер батча")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    cfg = config_from_args(args, DataConfig)
     device = get_device()
+    seed_everything(cfg.seed)
     print(f"device: {device}")
 
     t0 = time.time()
-    cfg = DataConfig(data_dir=args.data_dir, n_train_weeks=args.n_train_weeks,
-                     min_user_history=args.min_user_history)
     bundle = load_and_build(cfg)
     print(f"users={bundle.n_users} items={bundle.n_items} "
           f"train_triplets={len(bundle.train_u)} val_users={len(bundle.val_user_idxs)} "
           f"({time.time()-t0:.1f}s)")
 
-    model = FPMC(n_users=bundle.n_users, n_items=bundle.n_items, dim=args.dim)
+    model = FPMC(n_users=bundle.n_users, n_items=bundle.n_items, dim=cfg.dim)
     print(f"params: {sum(p.numel() for p in model.parameters()):,}")
 
     train_model(model, bundle, device=device,
-                epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
+                epochs=cfg.epochs, batch_size=cfg.batch_size, lr=cfg.lr,
+                seed=cfg.seed)
 
     t1 = time.time()
-    metrics = evaluate(model, bundle, device=device, k=args.k)
+    metrics = evaluate(model, bundle, device=device, k=cfg.k)
     print(f"metrics ({time.time()-t1:.1f}s): {metrics}")
 
     # сохраняем состояние модели на диск

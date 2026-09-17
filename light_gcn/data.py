@@ -4,29 +4,45 @@
 порядок строк внутри parquet (недели идут train: 00..24, validation: 25).
 Поэтому последовательность пользователя = его строки в глобальном порядке файлов.
 
-LightGCN работает с двудольным графом "пользователь -- ролик". В качестве
-положительных рёбер берутся все просмотренные пользователем ролики из истории
-(коллаборативный сигнал), а предсказание следующего ролика сводится к ранжированию
-кандидатов по близости эмбеддингов пользователя и ролика.
+LightGCN работает с двудольным графом "пользователь -- ролик". Разметка действий
+на позитив/негатив — единая для всех моделей (common.labels.assign_labels):
+положительные рёбра графа строятся только по позитивным действиям, а явные
+негативы (skip/dislike) используются в negative sampling.
 """
 
 import os
+import random
 from dataclasses import dataclass, field
 
 import numpy as np
+import polars as pl
 import torch
 from torch.utils.data import Dataset
 
-from common.data import build_user_sequences, build_validation, read_files
+from common.config import CommonConfig
+from common.data import (
+    build_id_maps,
+    build_sequences_with_maps,
+    build_validation,
+    read_files,
+)
+from common.labels import assign_labels
+from common.negatives import sample_negative
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 
 @dataclass
-class DataConfig:
-    data_dir: str = "data/raw/VK-LSVD/subsamples/up0.001_ip0.001"
-    n_train_weeks: int = 25   # недели 00..24
-    min_user_history: int = 2  # минимум взаимодействий у юзера, чтобы был переход
+class DataConfig(CommonConfig):
+    """Конфигурация данных LightGCN: общие настройки + модель-специфичные поля.
+
+    min_history в графовой модели не применяется (в граф попадают все
+    пользователи, как и раньше), чтобы не менять качество модели.
+    """
+
+    dim: int = 64
+    n_layers: int = 3
+    batch_size: int = 1024
 
     train_files: list = field(default_factory=list)
     val_files: list = field(default_factory=list)
@@ -34,10 +50,10 @@ class DataConfig:
     def __post_init__(self):
         if not self.train_files:
             self.train_files = [f"{self.data_dir}/train/week_{i:02}.parquet"
-                                for i in range(self.n_train_weeks)]
+                                for i in self.train_weeks]
         if not self.val_files:
-            dir_name = 'train' if self.n_train_weeks < 25 else 'validation'
-            self.val_files = [f"{self.data_dir}/{dir_name}/week_{self.n_train_weeks:02}.parquet"]
+            dir_name = 'validation' if self.val_week == 25 else 'train'
+            self.val_files = [f"{self.data_dir}/{dir_name}/week_{self.val_week:02}.parquet"]
 
 
 @dataclass
@@ -48,14 +64,18 @@ class DataBundle:
     n_users: int
     n_items: int
 
-    # положительные рёбра графа "пользователь -> ролик" (из истории)
+    # положительные рёбра графа "пользователь -> ролик" (только позитивные действия)
     train_users: np.ndarray
     train_items: np.ndarray
 
-    # история (user_idx -> list[item_idx]) для фильтрации при инференсе
+    # позитивная история (user_idx -> list[item_idx])
     history: dict
+    # ВСЕ взаимодействия юзера (pos+neg) для исключения из кандидатов при оценке
+    seen: dict
+    # явные негативы (skip/dislike) юзера для negative sampling
+    explicit_negatives: dict
 
-    # валидация: user_idx -> список верных item_idx
+    # валидация: user_idx -> список верных (позитивных) item_idx
     val_user_idxs: np.ndarray
     val_gt: list
 
@@ -63,25 +83,48 @@ class DataBundle:
 def load_and_build(cfg: DataConfig) -> DataBundle:
     """Читает train/validation parquet и строит граф взаимодействий.
 
-    Каждый ролик в истории пользователя становится положительным ребром
-    (u, i) — именно эти рёбра образуют матрицу смежности для LightGCN.
+    Каждый позитивный ролик в истории пользователя становится положительным
+    ребром (u, i) — именно эти рёбра образуют матрицу смежности для LightGCN.
     """
     train_df = read_files(cfg.train_files)
     val_df = read_files(cfg.val_files)
 
-    # ---------- словари + истории пользователей (в порядке строк) ----------
-    user_to_idx, item_to_idx, history = build_user_sequences(train_df)
+    # ---------- единая разметка позитив/негатив ----------
+    train_labeled = assign_labels(train_df, cfg.min_timespent_pos)
+    val_labeled = assign_labels(val_df, cfg.min_timespent_pos)
+    val_pos = val_labeled.filter(pl.col("label") == 1)
 
-    # ---------- рёбра графа (каждое взаимодействие = коллаборативный сигнал) ----------
+    # ---------- словари по полному train (pos и neg получают индексы) ----------
+    user_to_idx, item_to_idx = build_id_maps(train_df)
+
+    # ---------- позитивная история (хронологический порядок строк) ----------
+    pos_train = train_labeled.filter(pl.col("label") == 1)
+    history = build_sequences_with_maps(pos_train, user_to_idx, item_to_idx)
+
+    # ---------- явные негативы и множество «всего увиденного» ----------
+    neg_train = train_labeled.filter(pl.col("label") == 0)
+    seen: dict = {u: set() for u in user_to_idx.values()}
+    explicit_negatives: dict = {}
+    for user_id, items in neg_train.group_by("user_id").agg("item_id").iter_rows():
+        u = user_to_idx.get(user_id)
+        if u is None:
+            continue
+        lst = sorted({item_to_idx[i] for i in items if i in item_to_idx})
+        explicit_negatives[u] = lst
+        seen[u].update(lst)
+    for u, seq in history.items():
+        seen[u].update(seq)
+
+    # ---------- рёбра графа (каждый позитивный просмотр = коллаборативный сигнал) ----------
     edges_u: list[int] = []     # пользователи положительных рёбер
     edges_i: list[int] = []     # соответствующие ролики
     for u, seq in history.items():
         edges_u.extend([u] * len(seq))
         edges_i.extend(seq)
 
-    # ---------- валидация ----------
+    # ---------- валидация (target = только позитивные действия недели валидации) ----------
     val_user_idxs, val_gt = build_validation(
-        val_df, train_df, user_to_idx, item_to_idx, history)
+        val_pos, train_df, user_to_idx, item_to_idx, seen)
 
     return DataBundle(
         user_to_idx=user_to_idx,
@@ -91,6 +134,8 @@ def load_and_build(cfg: DataConfig) -> DataBundle:
         train_users=np.asarray(edges_u, dtype=np.int64),
         train_items=np.asarray(edges_i, dtype=np.int64),
         history=history,
+        seen=seen,
+        explicit_negatives=explicit_negatives,
         val_user_idxs=val_user_idxs,
         val_gt=val_gt,
     )
@@ -131,19 +176,30 @@ def build_normalized_adjacency(n_users: int, n_items: int,
 
 
 class LightGCNDataset(Dataset):
-    """Тренировочный датасет: по положительному ребру семплирует негативный ролик."""
+    """Тренировочный датасет: по положительному ребру семплирует негативный ролик.
 
-    def __init__(self, users: np.ndarray, items: np.ndarray, n_items: int):
+    Негатив берётся из явных негативов пользователя (skip/dislike), если они
+    есть, иначе — случайный ролик (common.negatives.sample_negative).
+    """
+
+    def __init__(self, users: np.ndarray, items: np.ndarray, n_items: int,
+                 explicit_negatives: dict | None = None, seed: int = 42):
         self.users = torch.as_tensor(users)
         self.items = torch.as_tensor(items)
         self.n_items = n_items
+        self.explicit_negatives = explicit_negatives or {}
+        self.rng = random.Random(seed)
 
     def __len__(self):
         return len(self.users)
 
     def __getitem__(self, idx):
-        neg = torch.randint(0, self.n_items, (1,)).item()
-        # не допускаем негатив == правильный ответ
-        while neg == self.items[idx].item():
-            neg = torch.randint(0, self.n_items, (1,)).item()
+        u = int(self.users[idx].item())
+        pos_item = int(self.items[idx].item())
+        neg = sample_negative(
+            self.explicit_negatives.get(u, ()),
+            self.n_items,
+            exclude=(pos_item,),
+            rng=self.rng,
+        )
         return self.users[idx], self.items[idx], neg

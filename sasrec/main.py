@@ -1,86 +1,106 @@
-"""Точка входа: загрузка данных -> построение словаря -> обучение SASRec -> метрики.
+"""Точка входа: словарь -> ленивое обучение SASRec -> метрики.
 
 Пример:
-    python -m sasrec.main
+    python -m sasrec.main --start-week 0 --end-week 24 --epochs 5
 """
+
+import argparse
+import time
+from functools import partial
+from typing import cast
 
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from common.cli import add_common_args, config_from_args
 from common.embeddings import load_embeddings_only
 from common.utils import get_device, seed_everything
 
 from .config import SASRecConfig
 from .data import (
     SequentialDataset,
-    build_sliding_samples,
-    collate_fn,
-    extract_week_interactions,
-    load_week_df,
-    remap_samples,
+    TrainIterableDataset,
+    collate_fn as sasrec_collate_fn,
+    read_week_item_ids,
 )
 from .embeddings import build_weight_matrix
 from .model import SASRec
 from .train import evaluate, train_epoch
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="SASRec для VK-LSVD")
+    add_common_args(p)
+    p.add_argument("--history-weeks", type=int, default=None,
+                   help="Сколько недель истории приходится на один target-сэмпл")
+    p.add_argument("--batch-size", type=int, default=None, help="Размер батча")
+    p.add_argument("--num-workers", type=int, default=None,
+                   help="Число воркеров DataLoader")
+    p.add_argument("--emb-width", type=int, default=None, help="Ширина эмбеддингов")
+    p.add_argument("--num-heads", type=int, default=None, help="Число голов внимания")
+    p.add_argument("--num-layers", type=int, default=None, help="Число слоёв Transformer")
+    p.add_argument("--dropout", type=float, default=None, help="Dropout")
+    return p.parse_args()
+
+
 def main():
-    cfg = SASRecConfig()
+    args = parse_args()
+    cfg = config_from_args(args, SASRecConfig)
+    seed_everything(cfg.seed)
     device = get_device()
     print(f"Device: {device}")
     print(f"Temporal setup: [{cfg.history_weeks} weeks] -> 1 week")
 
-    # --------------------------------------------------------
-    # Загрузка недель
-    # --------------------------------------------------------
-    all_weeks = list(range(cfg.train_start_week, cfg.val_week + 1))
-    weekly_data = {}
-    for week in all_weeks:
-        print(f"Loading week {week}...")
-        df = load_week_df(cfg, week)
-        weekly_data[week] = extract_week_interactions(df)
-        print(f"  users: {len(weekly_data[week]):,}")
+    if cfg.end_week < cfg.start_week + cfg.history_weeks:
+        raise RuntimeError(
+            "Нет ни одного тренировочного окна: end_week должен быть "
+            ">= start_week + history_weeks"
+        )
 
     # --------------------------------------------------------
-    # Train samples (слайдинг-окна)
+    # Словарь строится предварительным проходом только по колонке item_id
+    # (все train-недели + валидационная неделя), без материализации сэмплов.
     # --------------------------------------------------------
-    train_samples = []
-    for target_week in range(cfg.train_start_week + cfg.history_weeks, cfg.train_end_week + 1):
-        samples = build_sliding_samples(cfg, weekly_data=weekly_data, target_week=target_week)
-        print(f"Train window [{target_week - cfg.history_weeks}, {target_week - 1}]"
-              f" -> {target_week}: {len(samples):,} samples")
-        train_samples.extend(samples)
-
-    # --------------------------------------------------------
-    # Validation: [w22, w23] -> w24
-    # --------------------------------------------------------
-    val_samples = build_sliding_samples(cfg, weekly_data=weekly_data, target_week=cfg.val_week)
-    print(f"\nValidation: [{cfg.val_week - cfg.history_weeks}, {cfg.val_week - 1}]"
-          f" -> {cfg.val_week}")
-    print(f"Val samples: {len(val_samples):,}")
-
-    if not train_samples:
-        raise RuntimeError("No training samples.")
-    if not val_samples:
-        raise RuntimeError("No validation samples.")
-
-    # --------------------------------------------------------
-    # Vocabulary строится только по train + val-target айтемам
-    # --------------------------------------------------------
-    train_ids = set()
-    for input_seq, target, skipped in train_samples:
-        train_ids.update(input_seq)
-        train_ids.add(target)
-        train_ids.update(skipped)
-
-    # Для оценки добавляем target валидации в словарь.
-    for _, target, _ in val_samples:
-        train_ids.add(target)
-
-    id_to_idx = {old_id: idx + 1 for idx, old_id in enumerate(sorted(train_ids))}
+    print("Building vocabulary (item_id pre-pass)...")
+    all_ids = set()
+    for week in range(cfg.start_week, cfg.end_week + 1):
+        all_ids.update(read_week_item_ids(cfg, week))
+    all_ids.update(read_week_item_ids(cfg, cfg.val_week))  # неделя 25 (validation/)
+    id_to_idx = {old_id: idx + 1 for idx, old_id in enumerate(sorted(all_ids))}
     num_items = len(id_to_idx) + 1
     print(f"\nVocabulary: {len(id_to_idx):,} items")
+
+    # --------------------------------------------------------
+    # Train: ленивый IterableDataset (недели читаются на лету)
+    # --------------------------------------------------------
+    train_targets = range(cfg.start_week + cfg.history_weeks, cfg.end_week + 1)
+    train_dataset = TrainIterableDataset(cfg, id_to_idx, train_targets)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        collate_fn=partial(sasrec_collate_fn, max_len=cfg.max_history),
+    )
+
+    # --------------------------------------------------------
+    # Validation: один слайдинг-сэмпл на позитив валидационной недели.
+    # Материализуем один раз (валидация = 1 неделя, объём мал) — иначе
+    # каждая эпоха перечитывала бы валидационные недели заново.
+    # --------------------------------------------------------
+    val_iter = TrainIterableDataset(cfg, id_to_idx, [cfg.val_week])
+    val_samples = list(val_iter)
+    print(f"\nVal samples: {len(val_samples):,}")
+    if not val_samples:
+        raise RuntimeError("No validation samples.")
+    val_dataset = SequentialDataset(val_samples)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        collate_fn=partial(sasrec_collate_fn, max_len=cfg.max_history),
+    )
 
     # --------------------------------------------------------
     # Pretrained embeddings -> весовая матрица
@@ -91,41 +111,12 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Remap
-    # --------------------------------------------------------
-    train_samples = remap_samples(train_samples, id_to_idx)
-    val_samples = remap_samples(val_samples, id_to_idx)
-    print(f"Train samples after remap: {len(train_samples):,}")
-    print(f"Val samples after remap: {len(val_samples):,}")
-
-    # --------------------------------------------------------
-    # Dataset / Loader
-    # --------------------------------------------------------
-    train_dataset = SequentialDataset(train_samples)
-    val_dataset = SequentialDataset(val_samples)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        collate_fn=lambda batch: collate_fn(batch, cfg.max_len),
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-        collate_fn=lambda batch: collate_fn(batch, cfg.max_len),
-    )
-
-    # --------------------------------------------------------
     # Model
     # --------------------------------------------------------
     model = SASRec(
         num_items=num_items,
         emb_dim=cfg.emb_width,
-        max_len=cfg.max_len,
+        max_len=cfg.max_history,
         num_heads=cfg.num_heads,
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
@@ -139,12 +130,18 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
 
+    log_every = max(100, cfg.batch_size * 50)
     best_ndcg = -1.0
     for epoch in range(cfg.epochs):
-        loss = train_epoch(model, train_loader, optimizer, device)
-        hit, ndcg = evaluate(model, val_loader, device=device, top_k=cfg.top_k)
+        t_epoch = time.time()
+        loss = train_epoch(model, train_loader, optimizer, device,
+                           epoch=epoch + 1, log_every=log_every)
+        metrics = cast(dict, evaluate(
+            model, val_loader, device=device, top_k=cfg.k, log_every=log_every))
         print(f"Epoch {epoch + 1:02d}: Loss={loss:.5f} | "
-              f"Hit@{cfg.top_k}={hit:.5f} | NDCG@{cfg.top_k}={ndcg:.5f}")
+              + " | ".join(f"{m}={v:.5f}" for m, v in metrics.items())
+              + f" | time={time.time() - t_epoch:.0f}s")
+        ndcg = metrics.get(f"ndcg@{cfg.k}", -1.0)
         if ndcg > best_ndcg:
             best_ndcg = ndcg
             torch.save(
@@ -153,9 +150,9 @@ def main():
                     "id_to_idx": id_to_idx,
                     "config": {
                         "emb_width": cfg.emb_width,
-                        "max_len": cfg.max_len,
+                        "max_len": cfg.max_history,
                         "history_weeks": cfg.history_weeks,
-                        "top_k": cfg.top_k,
+                        "top_k": cfg.k,
                     },
                     "best_ndcg": best_ndcg,
                 },
@@ -166,5 +163,4 @@ def main():
 
 
 if __name__ == "__main__":
-    seed_everything(42)
     main()

@@ -18,8 +18,9 @@ def train_model(
     batch_size: int = 1024,
     lr: float = 1e-3,
     log_every: int = 200,
+    seed: int = 42,
 ):
-    dataset = FPMCDataset(bundle, n_items=bundle.n_items)
+    dataset = FPMCDataset(bundle, n_items=bundle.n_items, seed=seed)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -50,10 +51,14 @@ def evaluate(
     device: str,
     k: int = 10,
     batch_cand: int = 4096,
-) -> dict:
+    return_per_user: bool = False,
+):
     """Recall@k / NDCG@k / MRR@k на юзерах из валидации.
 
-    Из кандидатов исключаются айтемы, которые пользователь уже видел в истории.
+    Из кандидатов исключаются все взаимодействия пользователя (pos+neg).
+
+    Returns:
+        dict метрик; при return_per_user=True — (user_idxs, gt_positions).
     """
     model.to(device).eval()
 
@@ -63,8 +68,8 @@ def evaluate(
 
     with torch.no_grad():
         for pos, u in enumerate(bundle.val_user_idxs):
-            # исключаем айтемы из истории пользователя
-            seen = set(bundle.history[u])
+            # исключаем все взаимодействия пользователя (pos+neg)
+            seen = bundle.seen[u]
             cand = np.array([i for i in range(bundle.n_items) if i not in seen], dtype=np.int64)
             l = bundle.last_item.get(u, -1)
             if l == -1 or len(cand) == 0:
@@ -107,4 +112,7 @@ def evaluate(
         positions = np.array([rank[c] for c in col_of_gt], dtype=int)
         gt_positions.append(positions)
 
-    return eval_metrics(gt_positions, k)
+    metrics = eval_metrics(gt_positions, k)
+    if return_per_user:
+        return bundle.val_user_idxs[kept_pos], gt_positions
+    return metrics

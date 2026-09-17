@@ -20,4 +20,5 @@ dependencies = [
     "scipy-stubs==1.18.0.1",
     "seaborn>=0.13.2",
     "sns>=0.1",
+    "torch-geometric>=2.8.0.post1",
 ]

@@ -219,3 +219,7 @@ __marimo__/
 .obsidian/
 .venv/
 data/
+train/artifacts/
+train/results/
+
+

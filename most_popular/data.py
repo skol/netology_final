@@ -1,9 +1,9 @@
 """Загрузка и подготовка данных VK-LSVD для MostPopular.
 
-Правила разметки примеров:
-  - положительный: timespent >= min_timespent_pos ИЛИ есть реакция пользователя
-    (like / dislike / share / bookmark);
-  - отрицательный: timespent < min_timespent_pos И нет ни одной реакции;
+Правила разметки примеров (единые для всех моделей проекта, common.labels):
+  - положительный: timespent >= min_timespent_pos ИЛИ одна из реакций
+    like / share / bookmark / click_on_author / open_comments;
+  - отрицательный: НЕ позитив И (timespent < min_timespent_pos ИЛИ dislike);
   - строки, не попавшие ни в одну категорию, отбрасываются.
 
 Популярность айтема = число положительных взаимодействий за тренировочный период.
@@ -17,9 +17,7 @@ import numpy as np
 import polars as pl
 
 from common.data import build_id_maps, read_week, read_weeks
-
-# Колонки, которые считаются реакциями пользователя.
-REACTION_COLS = ["like", "dislike", "share", "bookmark", "click_on_author", "open_comments"]
+from common.labels import assign_labels
 
 
 @dataclass
@@ -44,29 +42,12 @@ class DataBundle:
     val_gt: list
 
 
-def _assign_labels(df: pl.DataFrame, min_timespent: int) -> pl.DataFrame:
-    """Добавляет колонку label: 1 (pos), 0 (neg). Неоднозначные строки удаляются."""
-    has_reaction = (
-        df["like"] | df["dislike"] | df["share"] | df["bookmark"] | df["click_on_author"] | df["open_comments"]
-    )
-    positive = (df["timespent"] >= min_timespent) | has_reaction
-    negative = (df["timespent"] < min_timespent) & (~has_reaction)
-
-    out = df.with_columns(
-        pl.when(positive)
-        .then(pl.lit(1, dtype=pl.Int8))
-        .otherwise(pl.when(negative).then(pl.lit(0, dtype=pl.Int8)).otherwise(None))
-        .alias("label")
-    )
-    return out.filter(pl.col("label").is_not_null())
-
-
 def load_and_build(cfg) -> DataBundle:
     train_df = read_weeks(cfg.data_dir, cfg.train_weeks)
     val_df = read_week(cfg.data_dir, cfg.val_week)
 
-    train_df = _assign_labels(train_df, cfg.min_timespent_pos)
-    val_df = _assign_labels(val_df, cfg.min_timespent_pos)
+    train_df = assign_labels(train_df, cfg.min_timespent_pos)
+    val_df = assign_labels(val_df, cfg.min_timespent_pos)
 
     # ---------- словари по тренировочному периоду ----------
     user_to_idx, item_to_idx = build_id_maps(train_df)

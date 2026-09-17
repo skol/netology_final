@@ -1,21 +1,33 @@
 """Тренировка SASRec с BPR-подобным loss и оценка Hit@k / NDCG@k."""
 
-import random
+import time
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from common.metrics import eval_metrics
+from common.negatives import sample_negative
 from common.utils import get_device, seed_everything
 
 from .model import SASRec
 
 
-def train_epoch(model: SASRec, loader: DataLoader, optimizer, device: str) -> float:
+def train_epoch(model: SASRec, loader: DataLoader, optimizer, device: str,
+                epoch: int | None = None, log_every: int = 1000) -> float:
+    """Одна эпоха обучения; возвращает средний loss.
+
+    Args:
+        epoch: номер эпохи (для логов, 1-based); None — не печатать.
+        log_every: печатать прогресс каждые log_every батчей.
+    """
     model.train()
     total_loss = 0.0
-    for input_batch, pos_batch, target_batch, skipped_batch in loader:
+    n_batches = 0
+    t_start = time.time()
+    tag = f"[epoch {epoch}] " if epoch is not None else ""
+    for _, input_batch, pos_batch, target_batch, skipped_batch in loader:
         optimizer.zero_grad()
         input_batch = input_batch.to(device)
         pos_batch = pos_batch.to(device)
@@ -25,17 +37,16 @@ def train_epoch(model: SASRec, loader: DataLoader, optimizer, device: str) -> fl
         pos_embs = model.item_embedding(target_batch)
         pos_embs_norm = F.normalize(pos_embs, p=2, dim=1)
 
-        # ---- Negative sampling ----
+        # ---- Negative sampling (единый helper из common.negatives) ----
         neg_indices = []
         num_items = model.item_embedding.num_embeddings
         for tgt, skipped in zip(target_batch.detach().cpu().tolist(), skipped_batch):
-            candidates = [s for s in skipped if s != tgt and s != 0]
-            if candidates:
-                neg_idx = random.choice(candidates)
-            else:
-                neg_idx = random.randint(1, num_items - 1)
-                while neg_idx == tgt:
-                    neg_idx = random.randint(1, num_items - 1)
+            # явные негативы юзера (без padding-индекса 0); target тоже исключается
+            neg_idx = sample_negative(
+                [s for s in skipped if s != 0],
+                num_items,
+                exclude=(tgt, 0),
+            )
             neg_indices.append(neg_idx)
         neg_indices = torch.tensor(neg_indices, dtype=torch.long, device=device)
         neg_embs = model.item_embedding(neg_indices)
@@ -51,23 +62,37 @@ def train_epoch(model: SASRec, loader: DataLoader, optimizer, device: str) -> fl
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / max(len(loader), 1)
+        n_batches += 1
+        if n_batches % log_every == 0:
+            print(f"  {tag}batch {n_batches:,}: loss={total_loss / n_batches:.5f} "
+                  f"({time.time() - t_start:.0f}s)", flush=True)
+    # len(loader) недоступен для IterableDataset, поэтому считаем батчи сами
+    return total_loss / max(n_batches, 1)
 
 
 @torch.no_grad()
-def evaluate(model: SASRec, loader: DataLoader, device: str, top_k: int = 10):
-    model.eval()
+def evaluate(model: SASRec, loader: DataLoader, device: str, top_k: int = 10,
+             return_per_user: bool = False, log_every: int = 0):
+    """Recall@k / NDCG@k / MRR@k (+ Hit@k) на валидационных сэмплах.
 
-    hits = 0
-    ndcgs = 0.0
-    total = 0
+    Из кандидатов исключаются позитивная история (input) и явные негативы
+    (skipped), кроме самого target. Ранги агрегируются по user_id — это
+    позволяет считать метрики по группам пользователей.
+
+    Returns:
+        dict метрик; при return_per_user=True — (user_ids, gt_positions).
+    """
+    model.eval()
 
     item_weights = model.item_embedding.weight
     item_weights_norm = F.normalize(item_weights, p=2, dim=1)
     if not torch.isfinite(item_weights_norm).all():
         raise RuntimeError("NaN/Inf in item embeddings during evaluation")
 
-    for input_batch, pos_batch, target_batch, _ in loader:
+    user_ranks: dict = {}   # user_id -> список 1-based рангов (0 = не попал в топ-k)
+    n_batches = 0
+    t_start = time.time()
+    for user_ids, input_batch, pos_batch, target_batch, skipped_batch in loader:
         input_batch = input_batch.to(device)
         pos_batch = pos_batch.to(device)
         target_batch = target_batch.to(device)
@@ -80,7 +105,7 @@ def evaluate(model: SASRec, loader: DataLoader, device: str, top_k: int = 10):
         # Не рекомендуем padding.
         scores[:, 0] = -float("inf")
 
-        # Не рекомендуем уже просмотренные items.
+        # Не рекомендуем уже просмотренные items (позитивная история).
         seen = input_batch.ne(0)
         scores.scatter_(
             1, input_batch,
@@ -90,16 +115,34 @@ def evaluate(model: SASRec, loader: DataLoader, device: str, top_k: int = 10):
                 scores.gather(1, input_batch),
             ),
         )
+        # Не рекомендуем явно негативные items (skip/dislike), кроме target.
+        # Векторизованная запись (расширенное индексирование), а не цикл по
+        # элементам: посимвольная запись в CUDA-тензор вызывает синхронизацию
+        # на каждый индекс и замедляет оценку на порядки.
+        targets_cpu = target_batch.detach().cpu().tolist()
+        for i, skipped in enumerate(skipped_batch):
+            tgt = targets_cpu[i]
+            mask_idx = [s for s in skipped if s != 0 and s != tgt]
+            if mask_idx:
+                scores[i, mask_idx] = -float("inf")
         _, topk_indices = torch.topk(scores, k=top_k, dim=1)
-        for i, tgt in enumerate(target_batch):
+        for i, (uid, tgt) in enumerate(zip(user_ids, target_batch.tolist())):
             matches = (topk_indices[i] == tgt)
-            if matches.any():
-                rank = (torch.where(matches)[0][0].item() + 1)
-                hits += 1
-                ndcgs += (1.0 / np.log2(rank + 1))
-            total += 1
+            rank = int(torch.where(matches)[0][0].item()) + 1 if matches.any() else 0
+            user_ranks.setdefault(int(uid), []).append(rank)
+        n_batches += 1
+        if log_every and n_batches % log_every == 0:
+            print(f"  [eval] batch {n_batches:,} ({time.time() - t_start:.0f}s)",
+                  flush=True)
 
-    if total == 0:
-        return 0.0, 0.0
+    user_ids_arr = sorted(user_ranks.keys())
+    gt_positions = [np.asarray(user_ranks[u], dtype=int) for u in user_ids_arr]
+    metrics = eval_metrics(gt_positions, top_k)
+    n_users = len(gt_positions)
+    metrics[f"hit@{top_k}"] = float(
+        sum(int((p > 0).any()) for p in gt_positions) / n_users if n_users else 0.0
+    )
 
-    return hits / total, ndcgs / total
+    if return_per_user:
+        return user_ids_arr, gt_positions
+    return metrics
