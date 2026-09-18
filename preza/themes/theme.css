@@ -1,0 +1,122 @@
+/* @theme project */
+
+@import 'default';
+
+:root {
+  --ink: #0f172a;
+  --muted: #64748b;
+  --accent: #4f46e5;
+  --accent2: #0ea5e9;
+}
+
+section {
+  background: #ffffff;
+  color: var(--ink);
+  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 28px;
+  line-height: 1.45;
+  padding: 64px 72px 56px;
+}
+
+/* верхняя акцентная полоса */
+section::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 8px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+
+h1 {
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 0.6em;
+}
+h1::after {
+  content: '';
+  display: block;
+  width: 72px;
+  height: 4px;
+  margin-top: 12px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+h2 { font-size: 34px; color: var(--ink); }
+
+strong { color: var(--accent); }
+
+a { color: var(--accent); }
+
+code {
+  background: #eef2ff;
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.85em;
+}
+
+ul, ol { padding-left: 1.1em; }
+li { margin-bottom: 0.35em; }
+li::marker { color: var(--accent); }
+
+blockquote {
+  border-left: 5px solid var(--accent2);
+  background: #f0f9ff;
+  color: var(--ink);
+  padding: 0.4em 1em;
+  font-size: 0.85em;
+}
+
+table {
+  font-size: 21px;
+  border-collapse: collapse;
+  margin: 0 auto;
+}
+th {
+  background: var(--ink);
+  color: #fff;
+  padding: 8px 14px;
+}
+td {
+  padding: 6px 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+tr:nth-child(even) td { background: #f8fafc; }
+
+img { max-height: 62vh; }
+
+/* ---------- титульный ---------- */
+section.lead {
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 55%, #312e81 100%);
+  color: #e2e8f0;
+  text-align: left;
+}
+section.lead::before {
+  background: linear-gradient(90deg, #818cf8, #38bdf8);
+}
+section.lead h1 {
+  color: #ffffff;
+  font-size: 46px;
+  line-height: 1.25;
+}
+section.lead h1::after { background: #38bdf8; }
+section.lead strong { color: #a5b4fc; }
+section.lead p { color: #cbd5e1; }
+
+/* ---------- вспомогательные классы ---------- */
+section.compact { font-size: 23px; }
+section.compact h1 { font-size: 36px; }
+section.compact table { font-size: 19px; }
+
+section.diagram h1 { font-size: 36px; }
+section.diagram img { max-height: 66vh; display: block; margin: 0 auto; }
+
+section.center { text-align: center; }
+
+/* номер слайда */
+section::after {
+  color: var(--muted);
+  font-size: 18px;
+}

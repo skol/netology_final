@@ -1,0 +1,100 @@
+/* @theme gradient */
+/* author: rnd195 github.com/rnd195/ */
+/* license: MIT github.com/rnd195/my-marp-themes/blob/live/licenses/LICENSE */
+
+@import "default";
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap");
+
+:root {
+  font-family: Inter, Helvetica, Arial;
+}
+
+
+/* --- BACKGROUND --- */
+section {
+  background-color: #ffffff;
+  background-image: linear-gradient(to top right, #e1c2e1 5%, #b9d5d9 95%);
+}
+
+
+/* --- TITLES --- */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: #842174;
+}
+
+
+/* --- TEXT CHANGES --- */
+a {
+  color: #9d30a6;
+}
+
+code {
+  background-color: #ffffffad;
+}
+
+mark {
+  background-color: #eaa2ee;
+  padding: 0 2px 2px;
+}
+
+pre {
+  background-color: #ffffffad;
+}
+
+
+/* --- BOTTOM BAR --- */
+section::after {
+  font-size: 0.75em;
+  /* From github.com/yhatt/marp/issues/263 */
+  content: attr(data-marpit-pagination) " / " attr(data-marpit-pagination-total);
+}
+
+
+/* --- CUSTOM CLASSES AND KEYWORDS --- */
+/* <!-- _class: blue --> */
+/* Blue variant of the gradient theme */
+section.blue {
+  background-color: #ffffff;
+  background-image: linear-gradient(to bottom right, #cadaf7 5%, #87a7e4 95%);
+}
+
+section.blue > h1,
+section.blue > h2,
+section.blue > h3,
+section.blue > h4,
+section.blue > h5,
+section.blue > h6 {
+  color: #214484;
+}
+
+section.blue > a {
+  color: #303ca6;
+}
+
+section.blue::after,
+section.blue > footer,
+section.blue > header {
+  color: #303ca6;
+}
+
+
+/* <!-- _class: tinytext --> */
+/* Makes p, ul, and blockquote text smaller to fit more text on a slide */
+section.tinytext > p,
+section.tinytext > ul,
+section.tinytext > blockquote {
+  font-size: 0.65em;
+}
+
+
+/* img keyword "center" */
+/* Centers an image, from github.com/marp-team/marpit/issues/141#issuecomment-473204518 */
+img[alt~="center"] {
+  display: block;
+  margin: 0 auto;
+}
